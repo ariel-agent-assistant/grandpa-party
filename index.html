@@ -139,7 +139,7 @@ async function genChunk(c,i){
     +(voiceUrl?"Audio 1 is his real voice: ALL spoken lines MUST use that exact voice, tone and cadence. ":"")
     +c.prompt;
   if(c.dialogue_ru)p+=' He says, spoken entirely IN RUSSIAN (no English), natural lip-sync: "'+c.dialogue_ru+'"';
-  const body={prompt:p,reference_image_urls:refUrls,duration:10,resolution:'768P',aspect_ratio:'16:9',
+  const body={prompt:p,reference_image_urls:refUrls,duration:10,resolution:'480P',aspect_ratio:'16:9',
     prompt_expansion_mode:'fast',seed};
   if(voiceUrl)body.reference_audio_urls=[voiceUrl];
   const j=await(await fetch(FAL+'/'+EP,{method:'POST',headers:{'Authorization':'Key '+fk,'Content-Type':'application/json'},
