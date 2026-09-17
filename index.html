@@ -31,6 +31,7 @@ video{width:100%;max-height:62vh;background:#000;border-radius:.5em;margin-top:1
 <div id=tx>(transcript appears here)</div>
 <button id=ok class=hide>✅ MAKE THE VIDEO</button><button id=no class=hide>↩️ RETRY</button>
 <div id=st></div>
+<div id=chunks class=small></div>
 <video id=v controls playsinline></video>
 <div class=small id=credits></div>
 </div>
@@ -171,10 +172,22 @@ $('ok').onclick=async()=>{
     if(Array.isArray(ep))ep={title:null,chunks:ep};
     $('title').textContent='🎬 '+(ep.title||'Grandpa Party');
     await ensureRefs();
-    (ep.chunks||[]).slice(0,3).forEach((c,i)=>genChunk(c,i).catch(e=>msg2('chunk '+(i+1)+' failed: '+e.message)));
+    chunkJobs=[];renderJobs();(ep.chunks||[]).slice(0,3).forEach((c,i)=>genChunk(c,i).catch(e=>{chunkJobs[i]=chunkJobs[i]||{};chunkJobs[i].state='failed';chunkJobs[i].err=e.message;renderJobs()}));
   }catch(e){$('tx').textContent='error: '+e.message}
 };
 
+let chunkJobs=[];
+function renderJobs(){
+  $('chunks').innerHTML=chunkJobs.map((j,i)=>{
+    if(!j)return '';
+    let t='chunk '+(i+1)+': '+j.state+(j.err?' - '+j.err:'')+(j.reqId?' <span style="opacity:.5">['+j.reqId.slice(0,8)+']</span>':'');
+    if(j.state==='failed')t+=' <a href="#" data-i="'+i+'" class=retry>RETRY FETCH (free)</a>';
+    return '<div>'+t+'</div>';
+  }).join('');
+  $('chunks').querySelectorAll('.retry').forEach(a=>a.onclick=e=>{e.preventDefault();
+    const i=+a.dataset.i;chunkJobs[i].state='fetching';chunkJobs[i].err='';renderJobs();pollJob(i);});
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function genChunk(c,i){
   let p=("Images 1-"+refUrls.length+" all show the same elderly man (short neat gray hair, fair skin, stocky build, warm lined face). Keep his face EXACTLY consistent with the reference images in every shot. ")
     +(voiceUrls.length?"Audio 1-"+voiceUrls.length+" are his real voice: ALL spoken lines MUST use that exact voice, tone and cadence. ":"")
@@ -183,27 +196,54 @@ async function genChunk(c,i){
   const body={prompt:p,reference_image_urls:refUrls,duration:10,resolution:'480P',aspect_ratio:'16:9',
     prompt_expansion_mode:'fast',seed};
   if(voiceUrls.length)body.reference_audio_urls=voiceUrls;
-  const j=await(await fetch(FAL+'/'+EP,{method:'POST',headers:{'Authorization':'Key '+fk,'Content-Type':'application/json'},
-    body:JSON.stringify(body)})).json();
-  if(!j.request_id)throw new Error(JSON.stringify(j).slice(0,200));
+  const jr=await fetch(FAL+'/'+EP,{method:'POST',headers:{'Authorization':'Key '+fk,'Content-Type':'application/json'},
+    body:JSON.stringify(body)});
+  const jtxt=await jr.text();
+  let j;try{j=JSON.parse(jtxt)}catch(e){throw new Error('submit returned non-JSON (HTTP '+jr.status+'): '+jtxt.slice(0,200))}
+  if(!jr.ok||!j.request_id)throw new Error('submit failed (HTTP '+jr.status+'): '+(j.detail||jtxt.slice(0,200)));
+  chunkJobs[i]={reqId:j.request_id,statusUrl:j.status_url,responseUrl:j.response_url,state:'queued',err:''};
+  try{sessionStorage.setItem('gp_job_'+i,JSON.stringify(chunkJobs[i]))}catch(e){}
+  renderJobs();
+  pollJob(i);
+}
+async function pollJob(i){
+  const j=chunkJobs[i];if(!j)return;
   const t0=Date.now();
   while(Date.now()-t0<600000){
-    await new Promise(r=>setTimeout(r,3000));
-    const st=await(await fetch(j.status_url,{headers:{'Authorization':'Key '+fk}})).json();
+    await sleep(3000);
+    let st;
+    try{st=await(await fetch(j.statusUrl,{headers:{'Authorization':'Key '+fk}})).json()}
+    catch(e){j.state='failed';j.err='status check failed: '+e.message;renderJobs();return}
     if(st.status==='COMPLETED'){
-      const out=await(await fetch(j.response_url,{headers:{'Authorization':'Key '+fk}})).json();
-      playQ[i]=out.video.url;msg2('chunk '+(i+1)+' ready ('+Math.round((Date.now()-t0)/1000)+'s)');
-      pump();return;
+      if(st.error){j.state='failed';j.err=(st.error_type?st.error_type+': ':'')+st.error;renderJobs();return}
+      try{
+        const r=await fetch(j.responseUrl,{headers:{'Authorization':'Key '+fk}});
+        const txt=await r.text();
+        let out;try{out=JSON.parse(txt)}catch(e){throw new Error('non-JSON result (HTTP '+r.status+'): '+txt.slice(0,200))}
+        if(!r.ok)throw new Error('HTTP '+r.status+': '+(out.detail||txt.slice(0,200)));
+        const url=out&&out.video&&out.video.url;
+        if(!url)throw new Error('result has no video.url: '+txt.slice(0,200));
+        j.state='ready';j.url=url;j.err='';
+        try{sessionStorage.setItem('gp_job_'+i,JSON.stringify(j))}catch(e){}
+        renderJobs();pump();return;
+      }catch(e){j.state='failed';j.err=e.message;renderJobs();return}
+    }else if(st.status==='IN_QUEUE'||st.status==='IN_PROGRESS'){
+      if(j.state!=='fetching'){j.state=st.status==='IN_QUEUE'?'queued':'rendering';renderJobs()}
+    }else{
+      j.state='failed';j.err='unexpected fal status: '+JSON.stringify(st).slice(0,200);renderJobs();return;
     }
-    if(st.status==='FAILED')throw new Error('fal job failed');
   }
-  throw new Error('timeout');
+  j.state='failed';j.err='timeout after 10 min';renderJobs();
 }
 function pump(){
   if(playing)return;
-  const next=playQ.findIndex(x=>x);
-  if(next<0)return;
-  playing=true;const url=playQ[next];playQ[next]=null;
-  const v=$('v');v.src=url;v.onended=()=>{playing=false;pump()};v.play().catch(()=>{playing=false});
+  for(let i=0;i<chunkJobs.length;i++){
+    const j=chunkJobs[i];
+    if(!j||j.state==='done'||j.state==='failed')continue;
+    if(j.state!=='ready')return;
+    playing=true;j.state='done';renderJobs();
+    const v=$('v');v.src=j.url;v.onended=()=>{playing=false;pump()};v.play().catch(()=>{playing=false});
+    return;
+  }
 }
 </script>
