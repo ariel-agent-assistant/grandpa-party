@@ -72,8 +72,41 @@ function pickWindow(rms,frameS,d,w){
   const nf=Math.max(1,Math.round(w/frameS));let best=-1,bi=0;
   for(let i=0;i+nf<=rms.length;i++){let s=0;for(let j=0;j<nf;j++)s+=rms[i+j];if(s>best){best=s;bi=i}}
   return bi*frameS}
+
+let _ff=null;
+async function ffLoad(){
+  if(!window.FFmpegWASM){
+    for(const src of ['https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js','https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js'])
+      await new Promise((res,rej)=>{const sc=document.createElement('script');sc.src=src;sc.onload=res;sc.onerror=()=>rej(new Error('failed to load '+src));document.head.appendChild(sc)});
+  }
+  if(!_ff){
+    const {FFmpeg}=window.FFmpegWASM,{toBlobURL}=window.FFmpegUtil;
+    _ff=new FFmpeg();
+    const base='https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    await _ff.load({coreURL:await toBlobURL(base+'/ffmpeg-core.js','text/javascript'),
+                    wasmURL:await toBlobURL(base+'/ffmpeg-core.wasm','application/wasm')});
+  }
+  return _ff;
+}
+async function ffConvertToWav(file){
+  const ff=await ffLoad();
+  const {fetchFile}=window.FFmpegUtil;
+  await ff.writeFile('in.bin',await fetchFile(file));
+  await ff.exec(['-i','in.bin','-vn','-ac','1','-ar','16000','out.wav']);
+  const data=await ff.readFile('out.wav');
+  await ff.deleteFile('in.bin').catch(()=>{});await ff.deleteFile('out.wav').catch(()=>{});
+  return new Blob([data.buffer],{type:'audio/wav'});
+}
 async function prepVoice(file,budget){
-  let a;try{a=await decodeAudioFile(file)}catch(e){return{error:'cannot decode '+file.name}}
+  let a;
+  try{a=await decodeAudioFile(file)}
+  catch(e){
+    let wav;
+    try{wav=await ffConvertToWav(file)}
+    catch(e2){return{error:file.name+': browser cannot decode it and conversion failed ('+e2.message+') - SKIPPED, nothing sent to fal'}}
+    try{a=await decodeAudioFile(new File([wav],'conv.wav',{type:'audio/wav'}))}
+    catch(e3){return{error:file.name+': converted but still unreadable - SKIPPED, nothing sent to fal'}}
+  }
   const d=a.duration,w=Math.min(d,budget,15);
   if(w<2)return{error:file.name+' skipped (needs >=2s; budget left '+budget.toFixed(1)+'s)'};
   const pcm=monoPCM(a),sr=a.sampleRate,frameS=0.1,fl=Math.round(sr*frameS),rms=[];
@@ -93,16 +126,19 @@ $('save').onclick=async()=>{
   if(fs.length){photos=[...fs];for(const f of fs)await idbPut('photo_'+f.name,f)}
   else{photos=(await idbGet('photolist'))||[];if(photos.length)photos=await Promise.all(photos.map(n=>idbGet('photo_'+n)))}
   if(fs.length)await idbPut('photolist',[...fs].map(f=>f.name));
+  let voiceWarn='';
   if($('vc').files.length){
-    voicePrepared=[];let budget=15;const notes=[];
+    voicePrepared=[];let budget=15;const notes=[],errs=[];
     for(const f of [...$('vc').files].slice(0,3)){
       const r=await prepVoice(f,budget);
-      if(r.error){notes.push(r.error);continue}
-      voicePrepared.push(r);budget-=r.dur;notes.push(f.name+' -> '+r.start.toFixed(1)+'-'+ (r.start+r.dur).toFixed(1)+'s');
+      if(r.error){errs.push(r.error);continue}
+      voicePrepared.push(r);budget-=r.dur;notes.push(f.name+' -> '+r.start.toFixed(1)+'-'+(r.start+r.dur).toFixed(1)+'s');
     }
+    if(errs.length&&voicePrepared.length===0){msg('VOICE FAILED: '+errs.join(' | ')+' - fix or clear the voice field');return}
+    if(notes.length)msg('voice trim: '+notes.join(' | '));
+    if(errs.length)voiceWarn=' | VOICE WARNING: '+errs.join(' | ');
     await idbPut('voiceprep_meta',voicePrepared.map(r=>({name:r.name,start:r.start,dur:r.dur})));
     for(let i=0;i<voicePrepared.length;i++)await idbPut('voiceprep_'+i,voicePrepared[i].blob);
-    if(notes.length)msg('voice trim: '+notes.join(' | '));
   }else{
     const meta=(await idbGet('voiceprep_meta'))||[];
     voicePrepared=(await Promise.all(meta.map(async(m,i)=>{const b=await idbGet('voiceprep_'+i);return b?{blob:b,...m}:null}))).filter(Boolean);
@@ -110,7 +146,7 @@ $('save').onclick=async()=>{
   if(!photos.length)return msg('upload at least 1 grandpa photo');
   seed=Math.floor(Math.random()*2**31);
   $('setup').classList.add('hide');$('app').classList.remove('hide');
-  msg2('ready - '+(photos.length)+' photos'+(voicePrepared.length?' + '+voicePrepared.length+' voice clip(s)':''));
+  msg2('ready - '+(photos.length)+' photos'+(voicePrepared.length?' + '+voicePrepared.length+' voice clip(s)':'')+voiceWarn);
 };
 function msg(t){$('setmsg').textContent=t}
 function msg2(t){$('st').textContent=t}
@@ -126,6 +162,7 @@ async function ensureRefs(){
   if(refUrls)return;
   msg2('uploading '+photos.length+' reference photos...');
   refUrls=await Promise.all(photos.map((f,i)=>fupload(f,'ref'+i+'.jpg',f.type||'image/jpeg')));
+  for(const r of voicePrepared)if(!r.blob||r.blob.type!=='audio/wav')throw new Error('internal: refusing to upload a non-wav voice clip to fal');
   voiceUrls=await Promise.all(voicePrepared.map((r,i)=>fupload(r.blob,'voice'+i+'.wav','audio/wav')));
 }
 
