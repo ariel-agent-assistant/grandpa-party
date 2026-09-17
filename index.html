@@ -1,0 +1,168 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grandpa Party</title>
+<style>
+body{font-family:system-ui;background:#0b0b0f;color:#eee;text-align:center;margin:0;padding:1.5em}
+button{font-size:1.5em;padding:.8em 1.5em;border-radius:.8em;border:0;margin:.4em;cursor:pointer}
+#rec{background:#d33;color:#fff}#ok{background:#2a4;color:#fff}#no{background:#555;color:#fff}
+.go{background:#36c;color:#fff}
+input{font-size:1.05em;padding:.5em;margin:.3em;border-radius:.4em;border:1px solid #444;background:#1a1a22;color:#eee;max-width:100%}
+#tx{font-size:1.3em;background:#181820;padding:1em;border-radius:.5em;min-height:2em;margin:1em auto;max-width:42em}
+video{width:100%;max-height:62vh;background:#000;border-radius:.5em;margin-top:1em}
+#st{opacity:.75;margin-top:.5em;white-space:pre-wrap}
+#setup{max-width:26em;margin:1em auto}#setup input{width:100%}
+.hide{display:none!important}.small{font-size:.85em;opacity:.6}
+</style>
+
+<div id=setup>
+<h2>🎬 Grandpa Party - setup</h2>
+<input id=pw type=password placeholder="Site password"><br>
+<input id=fk type=password placeholder="fal API key"><br>
+<input id=ok_ type=password placeholder="OpenRouter API key"><br>
+<label class=small>Grandpa photos (4-9, face clear):<br><input id=ph type=file accept="image/*" multiple></label><br>
+<label class=small>Grandpa voice clip (2-15s, optional):<br><input id=vc type=file accept="audio/*,video/*"></label><br>
+<button class=go id=save>UNLOCK</button><div id=setmsg></div>
+</div>
+
+<div id=app class=hide>
+<h1 id=title>🎬 Grandpa Party</h1>
+<button id=rec>🎤 SHOUT AN IDEA</button>
+<div id=tx>(transcript appears here)</div>
+<button id=ok class=hide>✅ MAKE THE VIDEO</button><button id=no class=hide>↩️ RETRY</button>
+<div id=st></div>
+<video id=v controls playsinline></video>
+<div class=small id=credits></div>
+</div>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const FAL='https://queue.fal.run', FALUP='https://rest.alpha.fal.ai/storage/upload/initiate',
+      WIZ='https://fal.run/fal-ai/wizper', EP='minimax/h3-max/reference-to-video',
+      ORC='https://openrouter.ai/api/v1/chat/completions';
+let fk=sessionStorage.getItem('gp_fk'), ok=sessionStorage.getItem('gp_ok');
+let photos=[], voiceBlob=null, mr, chunks=[], pending=null, playQ=[], playing=false, seed=null, refUrls=null, voiceUrl=null;
+
+async function sha(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
+
+function idb(){return new Promise((res,rej)=>{const r=indexedDB.open('gp',1);
+ r.onupgradeneeded=()=>r.result.createObjectStore('files');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+async function idbPut(k,v){const db=await idb();return new Promise((res,rej)=>{const t=db.transaction('files','readwrite');t.objectStore('files').put(v,k);t.oncomplete=res;t.onerror=()=>rej(t.error)})}
+async function idbGet(k){const db=await idb();return new Promise((res,rej)=>{const q=db.transaction('files').objectStore('files').get(k);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)})}
+
+$('save').onclick=async()=>{
+  const pw=$('pw').value;
+  const stored=localStorage.getItem('gp_pw');
+  if(!stored){if(!pw)return msg('pick a password');localStorage.setItem('gp_pw',await sha(pw))}
+  else if(await sha(pw)!==stored)return msg('wrong password');
+  if($('fk').value){fk=$('fk').value;sessionStorage.setItem('gp_fk',fk)}
+  if($('ok_').value){ok=$('ok_').value;sessionStorage.setItem('gp_ok',ok)}
+  if(!fk||!ok)return msg('need both API keys');
+  const fs=$('ph').files;
+  if(fs.length){photos=[...fs];for(const f of fs)await idbPut('photo_'+f.name,f)}
+  else{photos=(await idbGet('photolist'))||[];if(photos.length)photos=await Promise.all(photos.map(n=>idbGet('photo_'+n)))}
+  if(fs.length)await idbPut('photolist',[...fs].map(f=>f.name));
+  if($('vc').files[0]){voiceBlob=$('vc').files[0];await idbPut('voice',voiceBlob)}
+  else voiceBlob=await idbGet('voice');
+  if(!photos.length)return msg('upload at least 1 grandpa photo');
+  seed=Math.floor(Math.random()*2**31);
+  $('setup').classList.add('hide');$('app').classList.remove('hide');
+  msg2('ready - '+(photos.length)+' photos'+(voiceBlob?' + voice':''));
+};
+function msg(t){$('setmsg').textContent=t}
+function msg2(t){$('st').textContent=t}
+if(fk&&ok&&localStorage.getItem('gp_pw')){$('fk').placeholder='fal key (saved)';$('ok_').placeholder='openrouter key (saved)'}
+
+async function fupload(blob,name,mime){
+  const up=await(await fetch(FALUP,{method:'POST',headers:{'Authorization':'Key '+fk,'Content-Type':'application/json'},
+    body:JSON.stringify({file_name:name,content_type:mime})})).json();
+  await fetch(up.upload_url,{method:'PUT',headers:{'Content-Type':mime},body:blob});
+  return up.file_url;
+}
+async function ensureRefs(){
+  if(refUrls)return;
+  msg2('uploading '+photos.length+' reference photos...');
+  refUrls=await Promise.all(photos.map((f,i)=>fupload(f,'ref'+i+'.jpg',f.type||'image/jpeg')));
+  if(voiceBlob)voiceUrl=await fupload(voiceBlob,'voice.mp3',voiceBlob.type||'audio/mpeg');
+}
+
+$('rec').onclick=async()=>{
+  if(mr&&mr.state==='recording'){mr.stop();$('rec').textContent='⏳ transcribing...';return}
+  const s=await navigator.mediaDevices.getUserMedia({audio:true});
+  chunks=[];mr=new MediaRecorder(s);
+  mr.ondataavailable=e=>chunks.push(e.data);
+  mr.onstop=async()=>{
+    try{
+      const blob=new Blob(chunks,{type:mr.mimeType||'audio/webm'});
+      const url=await fupload(blob,'shout.webm',blob.type);
+      const j=await(await fetch(WIZ,{method:'POST',headers:{'Authorization':'Key '+fk,'Content-Type':'application/json'},
+        body:JSON.stringify({audio_url:url,task:'transcribe'})})).json();
+      if(!j.text)throw new Error(JSON.stringify(j).slice(0,200));
+      pending=j.text.trim();$('tx').textContent='“'+pending+'”';
+      $('ok').classList.remove('hide');$('no').classList.remove('hide');
+    }catch(e){$('tx').textContent='STT error: '+e.message}
+    $('rec').textContent='🎤 SHOUT AN IDEA';
+  };
+  mr.start();$('rec').textContent='🛑 TAP TO STOP';$('tx').textContent='Listening...';
+  $('ok').classList.add('hide');$('no').classList.add('hide');
+};
+$('no').onclick=()=>{pending=null;$('tx').textContent='(transcript appears here)';$('ok').classList.add('hide');$('no').classList.add('hide')};
+
+const DIRECTOR=`You are the director of a family birthday party video game. Guests shout crazy scenarios; you turn each into a FUNNY 30-second mini-episode starring the birthday grandpa as the HERO.
+Rules:
+- Family-party comedy: everyone from kids to grandma laughs. Nothing mean-spirited. Absurd, warm, celebratory. Grandpa always wins, deadpan.
+- Split into exactly 3 chunks of ~10 seconds: setup, escalation/twist, PUNCHLINE that makes the room roar. Continuous story.
+- Every chunk prompt is fully self-sufficient and must START with this exact SETTING LOCK sentence restating the episode's single setting in vivid detail (setting never changes across chunks).
+- Refer to grandpa as 'the elderly man from the reference images' and demand exact face consistency in every chunk.
+- In at most 2 chunks, grandpa says ONE short line (<=12 words) in natural spoken Russian (witty, warm, elderly). Other chunks have no dialogue.
+Return ONLY JSON: {"title": str, "chunks": [{"prompt": str, "dialogue_ru": str|null}]}`;
+
+$('ok').onclick=async()=>{
+  const idea=pending;pending=null;
+  $('ok').classList.add('hide');$('no').classList.add('hide');
+  $('tx').textContent='🎬 Making it... chunk 1 in ~30s';
+  try{
+    const dj=await(await fetch(ORC,{method:'POST',headers:{'Authorization':'Bearer '+ok,'Content-Type':'application/json'},
+      body:JSON.stringify({model:'google/gemini-3-flash-preview',temperature:1.0,response_format:{type:'json_object'},
+        messages:[{role:'system',content:DIRECTOR},{role:'user',content:'Shouted party idea: '+idea}]})})).json();
+    let ep=JSON.parse(dj.choices[0].message.content);
+    if(Array.isArray(ep))ep={title:null,chunks:ep};
+    $('title').textContent='🎬 '+(ep.title||'Grandpa Party');
+    await ensureRefs();
+    (ep.chunks||[]).slice(0,3).forEach((c,i)=>genChunk(c,i).catch(e=>msg2('chunk '+(i+1)+' failed: '+e.message)));
+  }catch(e){$('tx').textContent='error: '+e.message}
+};
+
+async function genChunk(c,i){
+  let p=("Images 1-"+refUrls.length+" all show the same elderly man (short neat gray hair, fair skin, stocky build, warm lined face). Keep his face EXACTLY consistent with the reference images in every shot. ")
+    +(voiceUrl?"Audio 1 is his real voice: ALL spoken lines MUST use that exact voice, tone and cadence. ":"")
+    +c.prompt;
+  if(c.dialogue_ru)p+=' He says, spoken entirely IN RUSSIAN (no English), natural lip-sync: "'+c.dialogue_ru+'"';
+  const body={prompt:p,reference_image_urls:refUrls,duration:10,resolution:'768P',aspect_ratio:'16:9',
+    prompt_expansion_mode:'fast',seed};
+  if(voiceUrl)body.reference_audio_urls=[voiceUrl];
+  const j=await(await fetch(FAL+'/'+EP,{method:'POST',headers:{'Authorization':'Key '+fk,'Content-Type':'application/json'},
+    body:JSON.stringify(body)})).json();
+  if(!j.request_id)throw new Error(JSON.stringify(j).slice(0,200));
+  const t0=Date.now();
+  while(Date.now()-t0<600000){
+    await new Promise(r=>setTimeout(r,3000));
+    const st=await(await fetch(j.status_url,{headers:{'Authorization':'Key '+fk}})).json();
+    if(st.status==='COMPLETED'){
+      const out=await(await fetch(j.response_url,{headers:{'Authorization':'Key '+fk}})).json();
+      playQ[i]=out.video.url;msg2('chunk '+(i+1)+' ready ('+Math.round((Date.now()-t0)/1000)+'s)');
+      pump();return;
+    }
+    if(st.status==='FAILED')throw new Error('fal job failed');
+  }
+  throw new Error('timeout');
+}
+function pump(){
+  if(playing)return;
+  const next=playQ.findIndex(x=>x);
+  if(next<0)return;
+  playing=true;const url=playQ[next];playQ[next]=null;
+  const v=$('v');v.src=url;v.onended=()=>{playing=false;pump()};v.play().catch(()=>{playing=false});
+}
+</script>
