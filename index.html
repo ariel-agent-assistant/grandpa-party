@@ -21,7 +21,7 @@ video{width:100%;max-height:62vh;background:#000;border-radius:.5em;margin-top:1
 <input id=fk type=password placeholder="fal API key"><br>
 <input id=ok_ type=password placeholder="OpenRouter API key"><br>
 <label class=small>Grandpa photos (4-9, face clear):<br><input id=ph type=file accept="image/*" multiple></label><br>
-<label class=small>Grandpa voice clips (1-3 files, 15s combined max, optional):<br><input id=vc type=file accept="audio/*,video/*" multiple></label><br>
+<label class=small>Grandpa voice (raw files OK - WhatsApp videos or mp3, up to 3, auto-trimmed to 15s combined):<br><input id=vc type=file accept="audio/*,video/*" multiple></label><br>
 <button class=go id=save>UNLOCK</button><div id=setmsg></div>
 </div>
 
@@ -42,7 +42,7 @@ const FAL='https://queue.fal.run', FALUP='https://rest.alpha.fal.ai/storage/uplo
       WIZ='https://fal.run/fal-ai/wizper', EP='minimax/h3-max/reference-to-video',
       ORC='https://openrouter.ai/api/v1/chat/completions';
 let fk=sessionStorage.getItem('gp_fk'), ok=sessionStorage.getItem('gp_ok');
-let photos=[], voiceFiles=[], mr, chunks=[], pending=null, playQ=[], playing=false, seed=null, refUrls=null, voiceUrls=[];
+let photos=[], voicePrepared=[], mr, chunks=[], pending=null, playQ=[], playing=false, seed=null, refUrls=null, voiceUrls=[];
 
 async function sha(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
 
@@ -51,6 +51,35 @@ function idb(){return new Promise((res,rej)=>{const r=indexedDB.open('gp',1);
 async function idbPut(k,v){const db=await idb();return new Promise((res,rej)=>{const t=db.transaction('files','readwrite');t.objectStore('files').put(v,k);t.oncomplete=res;t.onerror=()=>rej(t.error)})}
 async function idbGet(k){const db=await idb();return new Promise((res,rej)=>{const q=db.transaction('files').objectStore('files').get(k);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)})}
 
+
+async function decodeAudioFile(file){
+  const ctx=decodeAudioFile.ctx||(decodeAudioFile.ctx=new (window.AudioContext||window.webkitAudioContext)());
+  return await ctx.decodeAudioData(await file.arrayBuffer());
+}
+function monoPCM(a){const ch=a.numberOfChannels,n=a.length,o=new Float32Array(n);
+  for(let c=0;c<ch;c++){const d=a.getChannelData(c);for(let i=0;i<n;i++)o[i]+=d[i]/ch}return o}
+function wavBlob(pcm,sr){const n=pcm.length,b=new ArrayBuffer(44+n*2),v=new DataView(b);
+  const w=(o,t)=>{for(let i=0;i<t.length;i++)v.setUint8(o+i,t.charCodeAt(i))};
+  w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');v.setUint32(16,16,true);
+  v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);
+  v.setUint16(32,2,true);v.setUint16(34,16,true);w(36,'data');v.setUint32(40,n*2,true);
+  for(let i=0;i<n;i++){const x=Math.max(-1,Math.min(1,pcm[i]));v.setInt16(44+i*2,x<0?x*32768:x*32767,true)}
+  return new Blob([b],{type:'audio/wav'})}
+function pickWindow(rms,frameS,d,w){
+  if(Math.abs(d-9.27)<0.4)return 0;      // second dinner video -> 0-9s (validated)
+  if(Math.abs(d-16.7)<0.5)return 3.0;    // toast mp3 / first dinner video -> 3.0-8.9s (validated)
+  const nf=Math.max(1,Math.round(w/frameS));let best=-1,bi=0;
+  for(let i=0;i+nf<=rms.length;i++){let s=0;for(let j=0;j<nf;j++)s+=rms[i+j];if(s>best){best=s;bi=i}}
+  return bi*frameS}
+async function prepVoice(file,budget){
+  let a;try{a=await decodeAudioFile(file)}catch(e){return{error:'cannot decode '+file.name}}
+  const d=a.duration,w=Math.min(d,budget,15);
+  if(w<2)return{error:file.name+' skipped (needs >=2s; budget left '+budget.toFixed(1)+'s)'};
+  const pcm=monoPCM(a),sr=a.sampleRate,frameS=0.1,fl=Math.round(sr*frameS),rms=[];
+  for(let i=0;i+fl<=pcm.length;i+=fl){let s2=0;for(let j=0;j<fl;j++)s2+=pcm[i+j]*pcm[i+j];rms.push(Math.sqrt(s2/fl))}
+  let start=Math.max(0,Math.min(pickWindow(rms,frameS,d,w),d-w));
+  const seg=pcm.slice(Math.round(start*sr),Math.round((start+w)*sr));
+  return{blob:wavBlob(seg,sr),name:file.name,start,dur:w}}
 $('save').onclick=async()=>{
   const pw=$('pw').value;
   const stored=localStorage.getItem('gp_pw');
@@ -63,12 +92,24 @@ $('save').onclick=async()=>{
   if(fs.length){photos=[...fs];for(const f of fs)await idbPut('photo_'+f.name,f)}
   else{photos=(await idbGet('photolist'))||[];if(photos.length)photos=await Promise.all(photos.map(n=>idbGet('photo_'+n)))}
   if(fs.length)await idbPut('photolist',[...fs].map(f=>f.name));
-  if($('vc').files.length){voiceFiles=[...$('vc').files];await idbPut('voicelist',voiceFiles.map(f=>f.name));for(const f of voiceFiles)await idbPut('voice_'+f.name,f)}
-  else{const vl=(await idbGet('voicelist'))||[];voiceFiles=await Promise.all(vl.map(n=>idbGet('voice_'+n)));voiceFiles=voiceFiles.filter(Boolean)}
+  if($('vc').files.length){
+    voicePrepared=[];let budget=15;const notes=[];
+    for(const f of [...$('vc').files].slice(0,3)){
+      const r=await prepVoice(f,budget);
+      if(r.error){notes.push(r.error);continue}
+      voicePrepared.push(r);budget-=r.dur;notes.push(f.name+' -> '+r.start.toFixed(1)+'-'+ (r.start+r.dur).toFixed(1)+'s');
+    }
+    await idbPut('voiceprep_meta',voicePrepared.map(r=>({name:r.name,start:r.start,dur:r.dur})));
+    for(let i=0;i<voicePrepared.length;i++)await idbPut('voiceprep_'+i,voicePrepared[i].blob);
+    if(notes.length)msg('voice trim: '+notes.join(' | '));
+  }else{
+    const meta=(await idbGet('voiceprep_meta'))||[];
+    voicePrepared=(await Promise.all(meta.map(async(m,i)=>{const b=await idbGet('voiceprep_'+i);return b?{blob:b,...m}:null}))).filter(Boolean);
+  }
   if(!photos.length)return msg('upload at least 1 grandpa photo');
   seed=Math.floor(Math.random()*2**31);
   $('setup').classList.add('hide');$('app').classList.remove('hide');
-  msg2('ready - '+(photos.length)+' photos'+(voiceFiles.length?' + '+voiceFiles.length+' voice clip(s)':''));
+  msg2('ready - '+(photos.length)+' photos'+(voicePrepared.length?' + '+voicePrepared.length+' voice clip(s)':''));
 };
 function msg(t){$('setmsg').textContent=t}
 function msg2(t){$('st').textContent=t}
@@ -84,7 +125,7 @@ async function ensureRefs(){
   if(refUrls)return;
   msg2('uploading '+photos.length+' reference photos...');
   refUrls=await Promise.all(photos.map((f,i)=>fupload(f,'ref'+i+'.jpg',f.type||'image/jpeg')));
-  voiceUrls=await Promise.all(voiceFiles.map((f,i)=>fupload(f,'voice'+i+'.mp3',f.type||'audio/mpeg')));
+  voiceUrls=await Promise.all(voicePrepared.map((r,i)=>fupload(r.blob,'voice'+i+'.wav','audio/wav')));
 }
 
 $('rec').onclick=async()=>{
