@@ -21,7 +21,7 @@ video{width:100%;max-height:62vh;background:#000;border-radius:.5em;margin-top:1
 <input id=fk type=password placeholder="fal API key"><br>
 <input id=ok_ type=password placeholder="OpenRouter API key"><br>
 <label class=small>Grandpa photos (4-9, face clear):<br><input id=ph type=file accept="image/*" multiple></label><br>
-<label class=small>Grandpa voice (raw files OK - WhatsApp videos or mp3, up to 3, auto-trimmed to 15s combined):<br><input id=vc type=file accept="audio/*,video/*" multiple></label><br>
+<label class=small>Grandpa voice (raw files OK - WhatsApp videos or mp3, up to 3, auto-trimmed to 15s combined):<br><input id=vc type=file accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.aiff,.aif,.mov,.mp4,.3gp,.webm,.mkv" multiple></label><br>
 <button class=go id=save>UNLOCK</button><div id=setmsg></div>
 </div>
 
@@ -54,8 +54,8 @@ async function idbGet(k){const db=await idb();return new Promise((res,rej)=>{con
 
 
 async function decodeAudioFile(file){
-  const ctx=decodeAudioFile.ctx||(decodeAudioFile.ctx=new (window.AudioContext||window.webkitAudioContext)());
-  return await ctx.decodeAudioData(await file.arrayBuffer());
+  const ab=await file.arrayBuffer();
+  return await new OfflineAudioContext(1,1,44100).decodeAudioData(ab);
 }
 function monoPCM(a){const ch=a.numberOfChannels,n=a.length,o=new Float32Array(n);
   for(let c=0;c<ch;c++){const d=a.getChannelData(c);for(let i=0;i<n;i++)o[i]+=d[i]/ch}return o}
@@ -73,39 +73,39 @@ function pickWindow(rms,frameS,d,w){
   for(let i=0;i+nf<=rms.length;i++){let s=0;for(let j=0;j<nf;j++)s+=rms[i+j];if(s>best){best=s;bi=i}}
   return bi*frameS}
 
-let _ff=null;
-async function ffLoad(){
-  if(!window.FFmpegWASM){
-    for(const src of ['https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js','https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js'])
-      await new Promise((res,rej)=>{const sc=document.createElement('script');sc.src=src;sc.onload=res;sc.onerror=()=>rej(new Error('failed to load '+src));document.head.appendChild(sc)});
-  }
-  if(!_ff){
-    const {FFmpeg}=window.FFmpegWASM,{toBlobURL}=window.FFmpegUtil;
-    _ff=new FFmpeg();
-    const base='https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-    await _ff.load({coreURL:await toBlobURL(base+'/ffmpeg-core.js','text/javascript'),
-                    wasmURL:await toBlobURL(base+'/ffmpeg-core.wasm','application/wasm')});
-  }
-  return _ff;
-}
-async function ffConvertToWav(file){
-  const ff=await ffLoad();
-  const {fetchFile}=window.FFmpegUtil;
-  await ff.writeFile('in.bin',await fetchFile(file));
-  await ff.exec(['-i','in.bin','-vn','-ac','1','-ar','16000','out.wav']);
-  const data=await ff.readFile('out.wav');
-  await ff.deleteFile('in.bin').catch(()=>{});await ff.deleteFile('out.wav').catch(()=>{});
-  return new Blob([data.buffer],{type:'audio/wav'});
+async function captureAudioViaElement(file){
+  const url=URL.createObjectURL(file);
+  const v=document.createElement(file.type.startsWith('audio')?'audio':'video');
+  v.src=url;v.playsInline=true;v.volume=0.05;v.preload='auto';
+  const AC=window.AudioContext||window.webkitAudioContext;
+  const ctx=captureAudioViaElement.ctx||(captureAudioViaElement.ctx=new AC());
+  await ctx.resume();
+  const src=ctx.createMediaElementSource(v);
+  const dest=ctx.createMediaStreamDestination();
+  src.connect(dest);
+  const rec=new MediaRecorder(dest.stream);
+  const chunks=[];rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+  const stopped=new Promise(r=>rec.onstop=r);
+  await new Promise((res,rej)=>{v.onloadedmetadata=res;v.onerror=()=>rej(new Error('element cannot load the file'));setTimeout(()=>rej(new Error('load timeout')),15000)});
+  if(!isFinite(v.duration)||v.duration<=0)throw new Error('no playable audio track');
+  rec.start(250);
+  await v.play();
+  await new Promise(res=>{v.onended=res;setTimeout(res,Math.min(v.duration,20)*1000+2500)});
+  try{v.pause()}catch(e){}
+  rec.stop();await stopped;
+  URL.revokeObjectURL(url);src.disconnect();dest.disconnect();
+  if(!chunks.length)throw new Error('capture produced no audio');
+  return new Blob(chunks,{type:rec.mimeType||'audio/webm'});
 }
 async function prepVoice(file,budget){
   let a;
   try{a=await decodeAudioFile(file)}
   catch(e){
-    let wav;
-    try{wav=await ffConvertToWav(file)}
-    catch(e2){return{error:file.name+': browser cannot decode it and conversion failed ('+e2.message+') - SKIPPED, nothing sent to fal'}}
-    try{a=await decodeAudioFile(new File([wav],'conv.wav',{type:'audio/wav'}))}
-    catch(e3){return{error:file.name+': converted but still unreadable - SKIPPED, nothing sent to fal'}}
+    let cap;
+    try{cap=await captureAudioViaElement(file)}
+    catch(e2){return{error:file.name+': browser cannot decode it and audio-track capture failed ('+e2.message+') - SKIPPED, nothing sent to fal'}}
+    try{a=await decodeAudioFile(new File([cap],'capture.webm',{type:cap.type}))}
+    catch(e3){return{error:file.name+': captured but still unreadable - SKIPPED, nothing sent to fal'}}
   }
   const d=a.duration,w=Math.min(d,budget,15);
   if(w<2)return{error:file.name+' skipped (needs >=2s; budget left '+budget.toFixed(1)+'s)'};
