@@ -188,19 +188,25 @@ $('rec').onclick=async()=>{
 };
 $('no').onclick=()=>{pending=null;$('tx').textContent='(transcript appears here)';$('ok').classList.add('hide');$('no').classList.add('hide')};
 
-const DIRECTOR=`You are the director of a family birthday party video game. Guests shout crazy scenarios; you turn each into a FUNNY 30-second mini-episode starring the birthday grandpa as the HERO.
-Rules:
-- Family-party comedy: everyone from kids to grandma laughs. Nothing mean-spirited. Absurd, warm, celebratory. Grandpa always wins, deadpan.
-- Split into exactly 3 chunks of ~10 seconds: setup, escalation/twist, PUNCHLINE that makes the room roar. Continuous story.
-- Every chunk prompt is fully self-sufficient and must START with this exact SETTING LOCK sentence restating the episode's single setting in vivid detail (setting never changes across chunks).
+const DIRECTOR=`You are the head comedy writer of a family birthday party video game. Guests shout absurd scenarios; you turn each into a 30-second mini-episode starring the birthday grandpa as the deadpan hero, and your writing makes a room full of family HOWL.
+Comedy rules (this is what gets the laugh):
+- One strong absurd premise, escalated with the Rule of Three: each 10-second beat raises the stakes or flips the expectation.
+- Visual gags over dialogue. Grandpa REACTS - deadpan, supremely unbothered while chaos blooms around him. The comedy is the contrast.
+- Specificity is funny: the exact ridiculous prop, the exact absurd detail (a silver thermos in the gun holster, slippers under the tuxedo).
+- Punchline: the final beat lands a visual reversal. Optionally ONE short Russian line (<=12 words, dry, warm, grandfatherly wit). At most 2 chunks may have dialogue; many episodes need just one line total.
+- Family-party tone: kids to grandma laugh. Warm, celebratory, absurd. Grandpa always wins. Never mean.
+Structure:
+- Exactly 3 chunks of ~10 seconds forming ONE continuous unbroken scene: setup, escalation, punchline.
+- Every chunk prompt STARTS with the identical SETTING LOCK sentence (same vivid setting description, verbatim across all 3 chunks), then the words 'CONTINUITY: one continuous unbroken scene'.
+- Chunk 1 ends mid-action: finish its prompt with 'END STATE: <exact final pose and camera position>'. Chunk 2's prompt begins the action from chunk 1's exact end state; chunk 2 ends with its own END STATE; chunk 3 picks up from it.
+- Camera: one slow continuous move across the whole scene (e.g. slow push-in or slow pan), never cutting to a new setup.
 - Refer to grandpa as 'the elderly man from the reference images' and demand exact face consistency in every chunk.
-- In at most 2 chunks, grandpa says ONE short line (<=12 words) in natural spoken Russian (witty, warm, elderly). Other chunks have no dialogue.
 Return ONLY JSON: {"title": str, "chunks": [{"prompt": str, "dialogue_ru": str|null}]}`;
 
 $('ok').onclick=async()=>{
   const idea=pending;pending=null;
   $('ok').classList.add('hide');$('no').classList.add('hide');
-  $('tx').textContent='🎬 Making it... chunk 1 in ~30s';
+  $('tx').textContent='🎬 Making it... chunk 1 in ~1 min, then 2 and 3 follow (each continues from the last frame)';
   try{
     const dj=await(await fetch(ORC,{method:'POST',headers:{'Authorization':'Bearer '+ok,'Content-Type':'application/json'},
       body:JSON.stringify({model:'google/gemini-3-flash-preview',temperature:1.0,response_format:{type:'json_object'},
@@ -209,10 +215,29 @@ $('ok').onclick=async()=>{
     if(Array.isArray(ep))ep={title:null,chunks:ep};
     $('title').textContent='🎬 '+(ep.title||'Grandpa Party');
     await ensureRefs();
-    chunkJobs=[];renderJobs();(ep.chunks||[]).slice(0,3).forEach((c,i)=>genChunk(c,i).catch(e=>{chunkJobs[i]=chunkJobs[i]||{};chunkJobs[i].state='failed';chunkJobs[i].err=e.message;renderJobs()}));
+    chunkJobs=[];renderJobs();runEpisode((ep.chunks||[]).slice(0,3));
   }catch(e){$('tx').textContent='error: '+e.message}
 };
 
+async function lastFrameUrl(vurl){
+  const v=document.createElement('video');v.crossOrigin='anonymous';v.src=vurl;v.muted=true;v.playsInline=true;v.preload='auto';
+  await new Promise((res,rej)=>{v.onloadedmetadata=res;v.onerror=()=>rej(new Error('frame video load failed'))});
+  await new Promise((res,rej)=>{v.onseeked=res;v.onerror=rej;v.currentTime=Math.max(0,(v.duration||1)-0.1)});
+  const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
+  c.getContext('2d').drawImage(v,0,0);
+  const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',0.85));
+  return await fupload(blob,'prevframe.jpg','image/jpeg');
+}
+async function runEpisode(cs){
+  let prevFrame=null;
+  for(let i=0;i<cs.length;i++){
+    genChunk(cs[i],i,prevFrame).catch(e=>{chunkJobs[i]=chunkJobs[i]||{};chunkJobs[i].state='failed';chunkJobs[i].err=e.message;renderJobs()});
+    await new Promise(res=>{const t=setInterval(()=>{const j=chunkJobs[i];if(j&&(j.state==='ready'||j.state==='failed')){clearInterval(t);res()}},2000)});
+    if(chunkJobs[i]&&chunkJobs[i].state==='ready'){
+      try{prevFrame=await lastFrameUrl(chunkJobs[i].url)}catch(e){prevFrame=null}
+    }else prevFrame=null;
+  }
+}
 let chunkJobs=[];
 function renderJobs(){
   $('chunks').innerHTML=chunkJobs.map((j,i)=>{
@@ -225,12 +250,14 @@ function renderJobs(){
     const i=+a.dataset.i;chunkJobs[i].state='fetching';chunkJobs[i].err='';renderJobs();pollJob(i);});
 }
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-async function genChunk(c,i){
+async function genChunk(c,i,prevFrame){
+  const imgs=prevFrame?[...refUrls,prevFrame]:refUrls;
   let p=("Images 1-"+refUrls.length+" all show the same elderly man (short neat gray hair, fair skin, stocky build, warm lined face). Keep his face EXACTLY consistent with the reference images in every shot. ")
     +(voiceUrls.length?"Audio 1-"+voiceUrls.length+" are his real voice: ALL spoken lines MUST use that exact voice, tone and cadence. ":"")
+    +(prevFrame?("Image "+imgs.length+" is the exact final frame of the previous shot: the scene must continue seamlessly from that frame - identical setting, characters, lighting, camera position and camera motion, unbroken action. "):"")
     +c.prompt;
   if(c.dialogue_ru)p+=' He says, spoken entirely IN RUSSIAN (no English), natural lip-sync: "'+c.dialogue_ru+'"';
-  const body={prompt:p,reference_image_urls:refUrls,duration:10,resolution:'480P',aspect_ratio:'16:9',
+  const body={prompt:p,reference_image_urls:imgs,duration:10,resolution:'480P',aspect_ratio:'16:9',
     prompt_expansion_mode:'fast',seed};
   if(voiceUrls.length)body.reference_audio_urls=voiceUrls;
   const jr=await fetch(FAL+'/'+EP,{method:'POST',headers:{'Authorization':'Key '+fk,'Content-Type':'application/json'},
