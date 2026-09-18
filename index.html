@@ -211,18 +211,25 @@ $('ok').onclick=async()=>{
   $('ok').classList.add('hide');$('no').classList.add('hide');
   $('tx').textContent='🎬 Making it... chunk 1 in ~1 min, then 2 and 3 follow (each continues from the last frame)';
   try{
-    let ep=null,lastErr=null;
+    let ep=null,lastErr=null,bestPartial=null;
+    const conv=[{role:'system',content:DIRECTOR},{role:'user',content:'Shouted party idea: '+idea}];
     for(let attempt=0;attempt<3&&!ep;attempt++){
       try{
         const dj=await(await fetch(ORC,{method:'POST',headers:{'Authorization':'Bearer '+ok,'Content-Type':'application/json'},
           body:JSON.stringify({model:'google/gemini-3-flash-preview',temperature:1.0,response_format:{type:'json_object'},
-            messages:[{role:'system',content:DIRECTOR},{role:'user',content:'Shouted party idea: '+idea}]})})).json();
+            messages:conv})})).json();
         let p=JSON.parse(dj.choices[0].message.content);
         if(Array.isArray(p))p={title:null,chunks:p};
-        if(!p.chunks||p.chunks.length!==3)throw new Error('director returned '+((p.chunks||[]).length)+' chunks, need exactly 3');
+        const n=((p&&p.chunks)||[]).length;
+        if(n>=1&&n<3&&(!bestPartial||n>((bestPartial.chunks||[]).length)))bestPartial=p;
+        if(n!==3)throw new Error('director returned '+n+' chunks, need exactly 3');
         ep=p;
-      }catch(e){lastErr=e;console.warn('director attempt '+(attempt+1)+' failed:',e)}
+      }catch(e){
+        lastErr=e;console.warn('director attempt '+(attempt+1)+' failed:',e);
+        conv.push({role:'user',content:'Your last reply was invalid ('+e.message+'). Reply with ONLY the corrected JSON object: exactly 3 chunks for the SAME idea, nothing else.'});
+      }
     }
+    if(!ep&&bestPartial){ep=bestPartial;msg2('note: plot writer gave a short '+ep.chunks.length+'-chunk episode - still making it!')}
     if(!ep)throw new Error('plot writer failed 3 times: '+(lastErr&&lastErr.message));
     $('title').textContent='🎬 '+(ep.title||'Grandpa Party');
     await ensureRefs();
