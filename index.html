@@ -209,11 +209,19 @@ $('ok').onclick=async()=>{
   $('ok').classList.add('hide');$('no').classList.add('hide');
   $('tx').textContent='🎬 Making it... chunk 1 in ~1 min, then 2 and 3 follow (each continues from the last frame)';
   try{
-    const dj=await(await fetch(ORC,{method:'POST',headers:{'Authorization':'Bearer '+ok,'Content-Type':'application/json'},
-      body:JSON.stringify({model:'google/gemini-3-flash-preview',temperature:1.0,response_format:{type:'json_object'},
-        messages:[{role:'system',content:DIRECTOR},{role:'user',content:'Shouted party idea: '+idea}]})})).json();
-    let ep=JSON.parse(dj.choices[0].message.content);
-    if(Array.isArray(ep))ep={title:null,chunks:ep};
+    let ep=null,lastErr=null;
+    for(let attempt=0;attempt<3&&!ep;attempt++){
+      try{
+        const dj=await(await fetch(ORC,{method:'POST',headers:{'Authorization':'Bearer '+ok,'Content-Type':'application/json'},
+          body:JSON.stringify({model:'google/gemini-3-flash-preview',temperature:1.0,response_format:{type:'json_object'},
+            messages:[{role:'system',content:DIRECTOR},{role:'user',content:'Shouted party idea: '+idea}]})})).json();
+        let p=JSON.parse(dj.choices[0].message.content);
+        if(Array.isArray(p))p={title:null,chunks:p};
+        if(!p.chunks||p.chunks.length!==3)throw new Error('director returned '+((p.chunks||[]).length)+' chunks, need exactly 3');
+        ep=p;
+      }catch(e){lastErr=e;console.warn('director attempt '+(attempt+1)+' failed:',e)}
+    }
+    if(!ep)throw new Error('plot writer failed 3 times: '+(lastErr&&lastErr.message));
     $('title').textContent='🎬 '+(ep.title||'Grandpa Party');
     await ensureRefs();
     chunkJobs=[];renderJobs();runEpisode((ep.chunks||[]).slice(0,3));
