@@ -28,6 +28,7 @@ video{width:100%;max-height:62vh;background:#000;border-radius:.5em;margin-top:1
 <div id=app class=hide>
 <h1 id=title>🎬 Grandpa Party</h1>
 <button id=rec>🎤 SHOUT AN IDEA / КРИЧИ ИДЕЮ</button>
+<button id=lang style="font-size:1em;background:#555;color:#fff">язык: РУС</button>
 <div id=tx>(transcript appears here)</div>
 <button id=ok class=hide>✅ MAKE THE VIDEO</button><button id=no class=hide>↩️ RETRY</button>
 <div id=st></div>
@@ -43,7 +44,7 @@ const FAL='https://queue.fal.run', FALUP='https://rest.alpha.fal.ai/storage/uplo
       WIZ='https://fal.run/fal-ai/wizper', EP='minimax/h3-max/reference-to-video',
       ORC='https://openrouter.ai/api/v1/chat/completions';
 let fk=sessionStorage.getItem('gp_fk'), ok=sessionStorage.getItem('gp_ok');
-let photos=[], voicePrepared=[], mr, chunks=[], pending=null, playQ=[], playing=false, seed=null, refUrls=null, voiceUrls=[];
+let photos=[], voicePrepared=[], mr, sttLang='ru', chunks=[], pending=null, playQ=[], playing=false, seed=null, refUrls=null, voiceUrls=[];
 
 async function sha(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
 
@@ -166,6 +167,7 @@ async function ensureRefs(){
   voiceUrls=await Promise.all(voicePrepared.map((r,i)=>fupload(r.blob,'voice'+i+'.wav','audio/wav')));
 }
 
+$('lang').onclick=()=>{sttLang=sttLang==='ru'?'en':'ru';$('lang').textContent=sttLang==='ru'?'язык: РУС':'language: ENG'};
 $('rec').onclick=async()=>{
   if(mr&&mr.state==='recording'){mr.stop();$('rec').textContent='⏳ transcribing...';return}
   const s=await navigator.mediaDevices.getUserMedia({audio:true});
@@ -176,7 +178,7 @@ $('rec').onclick=async()=>{
       const blob=new Blob(chunks,{type:mr.mimeType||'audio/webm'});
       const url=await fupload(blob,'shout.webm',blob.type);
       const j=await(await fetch(WIZ,{method:'POST',headers:{'Authorization':'Key '+fk,'Content-Type':'application/json'},
-        body:JSON.stringify({audio_url:url,task:'transcribe'})})).json();
+        body:JSON.stringify({audio_url:url,task:'transcribe',language:sttLang})})).json();
       if(!j.text)throw new Error(JSON.stringify(j).slice(0,200));
       pending=j.text.trim();$('tx').textContent='“'+pending+'”';
       $('ok').classList.remove('hide');$('no').classList.remove('hide');
