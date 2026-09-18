@@ -232,8 +232,8 @@ async function runEpisode(cs){
   let prevFrame=null;
   for(let i=0;i<cs.length;i++){
     genChunk(cs[i],i,prevFrame).catch(e=>{chunkJobs[i]=chunkJobs[i]||{};chunkJobs[i].state='failed';chunkJobs[i].err=e.message;renderJobs()});
-    await new Promise(res=>{const t=setInterval(()=>{const j=chunkJobs[i];if(j&&(j.state==='ready'||j.state==='failed')){clearInterval(t);res()}},2000)});
-    if(chunkJobs[i]&&chunkJobs[i].state==='ready'){
+    await new Promise(res=>{const t=setInterval(()=>{const j=chunkJobs[i];if(j&&(j.state==='ready'||j.state==='done'||j.state==='failed')){clearInterval(t);res()}},2000)});
+    if(chunkJobs[i]&&(chunkJobs[i].state==='ready'||chunkJobs[i].state==='done')){
       try{prevFrame=await lastFrameUrl(chunkJobs[i].url)}catch(e){prevFrame=null}
     }else prevFrame=null;
   }
