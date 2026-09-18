@@ -27,7 +27,7 @@ video{width:100%;max-height:62vh;background:#000;border-radius:.5em;margin-top:1
 
 <div id=app class=hide>
 <h1 id=title>🎬 Grandpa Party</h1>
-<button id=rec>🎤 SHOUT AN IDEA</button>
+<button id=rec>🎤 SHOUT AN IDEA / КРИЧИ ИДЕЮ</button>
 <div id=tx>(transcript appears here)</div>
 <button id=ok class=hide>✅ MAKE THE VIDEO</button><button id=no class=hide>↩️ RETRY</button>
 <div id=st></div>
@@ -181,12 +181,12 @@ $('rec').onclick=async()=>{
       pending=j.text.trim();$('tx').textContent='“'+pending+'”';
       $('ok').classList.remove('hide');$('no').classList.remove('hide');
     }catch(e){$('tx').textContent='STT error: '+e.message}
-    $('rec').textContent='🎤 SHOUT AN IDEA';
+    $('rec').textContent='🎤 SHOUT AN IDEA / КРИЧИ ИДЕЮ';
   };
   mr.start();$('rec').textContent='🛑 TAP TO STOP';$('tx').textContent='Listening...';
   $('ok').classList.add('hide');$('no').classList.add('hide');
 };
-$('no').onclick=()=>{pending=null;$('tx').textContent='(transcript appears here)';$('ok').classList.add('hide');$('no').classList.add('hide')};
+$('no').onclick=()=>{pending=null;$('tx').textContent='(transcript appears here - Russian and English both work / можно по-русски)';$('ok').classList.add('hide');$('no').classList.add('hide')};
 
 const DIRECTOR=`You are the head comedy writer of a family birthday party video game. Guests shout absurd scenarios; you turn each into a 30-second mini-episode starring the birthday grandpa as the deadpan hero, and your writing makes a room full of family HOWL.
 Comedy rules (this is what gets the laugh):
@@ -201,6 +201,7 @@ Structure:
 - Chunk 1 ends mid-action: finish its prompt with 'END STATE: <exact final pose and camera position>'. Chunk 2's prompt begins the action from chunk 1's exact end state; chunk 2 ends with its own END STATE; chunk 3 picks up from it.
 - Camera: one slow continuous move across the whole scene (e.g. slow push-in or slow pan), never cutting to a new setup.
 - Refer to grandpa as 'the elderly man from the reference images' and demand exact face consistency in every chunk.
+The shouted idea may be in Russian, English, or a mix - understand it in ANY language and build the episode around what was actually said. Write chunk prompts in English (the video model follows English best); dialogue_ru lines stay in natural spoken Russian.
 Return ONLY JSON: {"title": str, "chunks": [{"prompt": str, "dialogue_ru": str|null}]}`;
 
 $('ok').onclick=async()=>{
